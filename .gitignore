@@ -1,0 +1,28 @@
+# Compiled binaries
+algebraic
+algebraic_png
+algebraic_go
+
+# Output files
+*.png
+*.ppm
+*.log
+*.csv
+*.txt
+
+# C object files
+*.o
+*.so
+*.a
+
+# Go binary
+go.sum
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.tmp
+*.bak

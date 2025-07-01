@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -10,7 +11,9 @@ import (
 	"math/cmplx"
 	"math/rand"
 	"os"
+	"runtime"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -31,8 +34,8 @@ type Config struct {
 	OutputFile      string
 }
 
-// findRootsInner implements Newton's method for polynomial root finding
-func findRootsInner(coeffs []complex128, order int) []complex128 {
+// findRootsInnerWithRand implements Newton's method for polynomial root finding with custom random source
+func findRootsInnerWithRand(coeffs []complex128, order int, rng *rand.Rand) []complex128 {
 	if order == 1 {
 		if coeffs[1] != 0 {
 			return []complex128{-coeffs[0] / coeffs[1]}
@@ -45,7 +48,7 @@ func findRootsInner(coeffs []complex128, order int) []complex128 {
 	const tolerance = 1e-20
 
 	// Start with a random initial guess
-	root := complex(rand.Float64()*2-1, rand.Float64()*2-1)
+	root := complex(rng.Float64()*2-1, rng.Float64()*2-1)
 
 	for iter := 0; iter < maxIters; iter++ {
 		oldRoot := root
@@ -61,7 +64,7 @@ func findRootsInner(coeffs []complex128, order int) []complex128 {
 
 		if cmplx.Abs(df) < 1e-15 {
 			// Derivative too small, try new starting point
-			root = complex(rand.Float64()*2-1, rand.Float64()*2-1)
+			root = complex(rng.Float64()*2-1, rng.Float64()*2-1)
 			continue
 		}
 
@@ -76,7 +79,7 @@ func findRootsInner(coeffs []complex128, order int) []complex128 {
 
 		// Restart with new random point occasionally
 		if iter%500 == 0 && iter > 0 {
-			root = complex(rand.Float64()*2-1, rand.Float64()*2-1)
+			root = complex(rng.Float64()*2-1, rng.Float64()*2-1)
 		}
 	}
 
@@ -91,89 +94,148 @@ func findRootsInner(coeffs []complex128, order int) []complex128 {
 		}
 
 		// Find remaining roots
-		remaining := findRootsInner(newCoeffs, order-1)
+		remaining := findRootsInnerWithRand(newCoeffs, order-1, rng)
 		roots = append(roots, remaining...)
 	}
 
 	return roots
 }
 
-// generateAlgebraicNumbers computes algebraic numbers up to given height
+// findRootsInner implements Newton's method for polynomial root finding (compatibility wrapper)
+func findRootsInner(coeffs []complex128, order int) []complex128 {
+	return findRootsInnerWithRand(coeffs, order, rand.New(rand.NewSource(time.Now().UnixNano())))
+}
+
+// PolyWork represents work for processing a single polynomial
+type PolyWork struct {
+	coeffs       []complex128
+	h            int
+	order        int
+	leadingCoeff int
+}
+
+// generateAlgebraicNumbers computes algebraic numbers up to given height using parallel processing
 func generateAlgebraicNumbers(maxHeight int) []Point {
-	var points []Point
-	stats := struct{ temps, eqns, roots int }{}
-
-	for h := 2; h <= maxHeight; h++ {
-		// Generate all possible coefficient patterns for height h
-		for i := (1 << (h - 1)) - 1; i >= 0; i -= 2 { // Step by 2 to avoid leading coefficient 0
-			// Convert bit pattern to coefficient magnitudes
-			coeffMags := make([]int, h)
-			k := 0
-			for j := h - 2; j >= 0; j-- {
-				if (i>>j)&1 == 1 {
-					coeffMags[k]++
-				} else {
-					k++
-					if k < h {
-						coeffMags[k] = 0
-					}
-				}
-			}
-			stats.temps++
-
-			if k == 0 {
-				continue // Invalid polynomial
-			}
-
-			order := k
-
-			// Count non-zero coefficients for sign combinations
-			nonZero := 0
-			for j := 0; j <= order; j++ {
-				if coeffMags[j] != 0 {
-					nonZero++
-				}
-			}
-
-			// Generate all sign combinations
-			for signs := 0; signs < (1 << (nonZero - 1)); signs++ {
-				// Build coefficient array
-				coeffs := make([]complex128, order+1)
-				signBit := 0
-
-				for j := 0; j <= order; j++ {
-					if coeffMags[j] == 0 || j == order {
-						coeffs[j] = complex(float64(coeffMags[j]), 0)
-					} else {
-						sign := 1
-						if (signs>>signBit)&1 == 1 {
-							sign = -1
-						}
-						coeffs[j] = complex(float64(sign*coeffMags[j]), 0)
-						signBit++
-					}
-				}
-
-				stats.eqns++
-
-				// Find roots of this polynomial
-				roots := findRootsInner(coeffs, order)
-
+	numWorkers := runtime.NumCPU()
+	fmt.Printf("Using %d CPU cores for parallel computation\n", numWorkers)
+	
+	// Channel for work distribution
+	workCh := make(chan PolyWork, 1000)
+	resultCh := make(chan []Point, 1000)
+	
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Each worker gets its own random source for thread safety
+			localRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+			
+			for work := range workCh {
+				// Process this polynomial
+				roots := findRootsInnerWithRand(work.coeffs, work.order, localRand)
+				
+				var workPoints []Point
 				for _, root := range roots {
-					stats.roots++
-					points = append(points, Point{
+					workPoints = append(workPoints, Point{
 						Z:            root,
-						H:            h,
-						O:            order,
-						LeadingCoeff: coeffMags[order], // Leading coefficient magnitude
+						H:            work.h,
+						O:            work.order,
+						LeadingCoeff: work.leadingCoeff,
 					})
+				}
+				resultCh <- workPoints
+			}
+		}()
+	}
+	
+	// Generate work items
+	go func() {
+		defer close(workCh)
+		
+		for h := 2; h <= maxHeight; h++ {
+			if maxHeight > 15 {
+				fmt.Printf("Processing height %d/%d...\n", h, maxHeight)
+			}
+			// Generate all possible coefficient patterns for height h
+			for i := (1 << (h - 1)) - 1; i >= 0; i -= 2 { // Step by 2 to avoid leading coefficient 0
+				// Convert bit pattern to coefficient magnitudes
+				coeffMags := make([]int, h)
+				k := 0
+				for j := h - 2; j >= 0; j-- {
+					if (i>>j)&1 == 1 {
+						coeffMags[k]++
+					} else {
+						k++
+						if k < h {
+							coeffMags[k] = 0
+						}
+					}
+				}
+
+				if k == 0 {
+					continue // Invalid polynomial
+				}
+
+				order := k
+
+				// Count non-zero coefficients for sign combinations
+				nonZero := 0
+				for j := 0; j <= order; j++ {
+					if coeffMags[j] != 0 {
+						nonZero++
+					}
+				}
+
+				// Generate all sign combinations
+				for signs := 0; signs < (1 << (nonZero - 1)); signs++ {
+					// Build coefficient array
+					coeffs := make([]complex128, order+1)
+					signBit := 0
+
+					for j := 0; j <= order; j++ {
+						if coeffMags[j] == 0 || j == order {
+							coeffs[j] = complex(float64(coeffMags[j]), 0)
+						} else {
+							sign := 1
+							if (signs>>signBit)&1 == 1 {
+								sign = -1
+							}
+							coeffs[j] = complex(float64(sign*coeffMags[j]), 0)
+							signBit++
+						}
+					}
+
+					// Send work to channel
+					workCh <- PolyWork{
+						coeffs:       coeffs,
+						h:            h,
+						order:        order,
+						leadingCoeff: coeffMags[order],
+					}
 				}
 			}
 		}
+	}()
+	
+	// Collect results
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+	
+	var allPoints []Point
+	stats := struct{ eqns, roots int }{}
+	
+	for points := range resultCh {
+		stats.eqns++
+		stats.roots += len(points)
+		allPoints = append(allPoints, points...)
 	}
 
-	fmt.Printf("Generated: temps=%d eqns=%d roots=%d\n", stats.temps, stats.eqns, stats.roots)
-	return points
+	fmt.Printf("Generated: eqns=%d roots=%d\n", stats.eqns, stats.roots)
+	return allPoints
 }
 
 // drawBlob draws a gaussian blob at the specified location with proper falloff
@@ -293,15 +355,39 @@ func renderImage(points []Point, config Config) error {
 }
 
 func printUsage(progName string) {
-	fmt.Printf("Usage: %s [x_min y_min x_max y_max]\n", progName)
+	fmt.Printf("Usage: %s [flags] [x_min y_min x_max y_max]\n", progName)
 	fmt.Printf("  Renders algebraic numbers in the complex plane rectangle from (x_min + y_min*i) to (x_max + y_max*i)\n")
-	fmt.Printf("  Default: %s -2 -2 2 2\n", progName)
-	fmt.Printf("  Example: %s 0 -1 1 2  (shows rectangle from 0-i to 1+2i)\n", progName)
+	fmt.Printf("\nFlags:\n")
+	fmt.Printf("  --max-height N    Maximum polynomial height (complexity). Higher = more detail but slower (default: 15)\n")
+	fmt.Printf("  --help, -h        Show this help message\n")
+	fmt.Printf("\nExamples:\n")
+	fmt.Printf("  %s                           # Default view (-2-2i to 2+2i), height 15\n", progName)
+	fmt.Printf("  %s --max-height 20           # Higher detail\n", progName)
+	fmt.Printf("  %s 0 -1 1 2                  # Custom rectangle (0-i to 1+2i)\n", progName)
+	fmt.Printf("  %s --max-height 25 -1 -1 1 1 # High detail, zoomed view\n", progName)
 }
 
 func main() {
 	// Initialize random seed
 	rand.Seed(time.Now().UnixNano())
+	
+	// Define flags
+	maxHeight := flag.Int("max-height", 15, "Maximum polynomial height (complexity). Higher = more detail but slower")
+	help := flag.Bool("h", false, "Show help message")
+	helpLong := flag.Bool("help", false, "Show help message")
+	
+	// Custom usage function
+	flag.Usage = func() {
+		printUsage(os.Args[0])
+	}
+	
+	// Parse flags
+	flag.Parse()
+	
+	if *help || *helpLong {
+		printUsage(os.Args[0])
+		return
+	}
 	
 	config := Config{
 		Width:      1200,
@@ -310,16 +396,12 @@ func main() {
 		YMin:       -2.0,
 		XMax:       2.0,
 		YMax:       2.0,
-		MaxHeight:  12,
+		MaxHeight:  *maxHeight,
 		OutputFile: "algebraic_numbers.png",
 	}
 	
-	// Parse command line arguments
-	args := os.Args[1:]
-	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		printUsage(os.Args[0])
-		return
-	}
+	// Parse remaining positional arguments for viewport
+	args := flag.Args()
 	
 	if len(args) == 4 {
 		var err error
@@ -340,9 +422,17 @@ func main() {
 			log.Fatal("Error: Invalid rectangle. x_min must be < x_max and y_min must be < y_max")
 		}
 	} else if len(args) != 0 {
-		fmt.Println("Error: Wrong number of arguments")
+		fmt.Println("Error: Wrong number of positional arguments")
 		printUsage(os.Args[0])
 		os.Exit(1)
+	}
+	
+	// Validate max height
+	if *maxHeight < 2 {
+		log.Fatal("Error: max-height must be at least 2")
+	}
+	if *maxHeight > 30 {
+		fmt.Printf("Warning: max-height %d is very high and may take a long time\n", *maxHeight)
 	}
 	
 	fmt.Printf("Rendering complex plane from (%.2f + %.2fi) to (%.2f + %.2fi)\n",

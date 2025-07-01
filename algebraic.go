@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"log"
 	"math"
 	"math/cmplx"
 	"math/rand"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -32,6 +36,8 @@ type Config struct {
 	XMax, YMax      float64
 	MaxHeight       int
 	OutputFile      string
+	VideoMode       bool
+	FrameRate       int
 }
 
 // findRootsInnerWithRand implements Newton's method for polynomial root finding with custom random source
@@ -298,7 +304,8 @@ func getColorForLeadingCoeff(coeff int) color.RGBA {
 	}
 }
 
-func renderImage(points []Point, config Config) error {
+// renderImageToBuffer creates an image in memory and returns it
+func renderImageToBuffer(points []Point, config Config) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, config.Width, config.Height))
 	
 	// Fill background with black
@@ -339,6 +346,13 @@ func renderImage(points []Point, config Config) error {
 		drawBlob(img, screenX, screenY, radius, color)
 	}
 	
+	return img
+}
+
+// renderImage renders to a file (wrapper around renderImageToBuffer)
+func renderImage(points []Point, config Config) error {
+	img := renderImageToBuffer(points, config)
+	
 	// Save as PNG
 	file, err := os.Create(config.OutputFile)
 	if err != nil {
@@ -354,17 +368,287 @@ func renderImage(points []Point, config Config) error {
 	return nil
 }
 
+// generateVideo creates an animation showing algebraic numbers filling in as height increases
+func generateVideo(config Config) error {
+	// Create temporary directory for frames
+	tempDir := "algebraic_frames"
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return fmt.Errorf("failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir) // Clean up
+	
+	fmt.Printf("Generating video frames for heights 2 to %d...\n", config.MaxHeight)
+	
+	// Generate cumulative points for animation
+	var allPoints []Point
+	frameNum := 0
+	
+	for h := 2; h <= config.MaxHeight; h++ {
+		fmt.Printf("Generating frame for height %d/%d...\n", h, config.MaxHeight)
+		
+		// Generate points for this height level
+		newPoints := generateAlgebraicNumbers(h)
+		
+		// For video, we want to show the cumulative effect
+		// So we keep all points from previous heights
+		allPoints = newPoints
+		
+		// Render frame
+		img := renderImageToBuffer(allPoints, config)
+		
+		// Add height indicator text overlay
+		addTextOverlay(img, fmt.Sprintf("Height: %d", h), config)
+		
+		// Save frame as JPEG (faster than PNG for video)
+		framePath := filepath.Join(tempDir, fmt.Sprintf("frame_%04d.jpg", frameNum))
+		if err := saveJPEG(img, framePath); err != nil {
+			return fmt.Errorf("failed to save frame %d: %v", frameNum, err)
+		}
+		
+		frameNum++
+		
+		// Add pause frames at interesting heights
+		if h <= 5 || h%5 == 0 {
+			// Hold this frame for a bit longer
+			for pause := 0; pause < config.FrameRate/2; pause++ {
+				framePath := filepath.Join(tempDir, fmt.Sprintf("frame_%04d.jpg", frameNum))
+				if err := saveJPEG(img, framePath); err != nil {
+					return fmt.Errorf("failed to save pause frame %d: %v", frameNum, err)
+				}
+				frameNum++
+			}
+		}
+	}
+	
+	// Generate video using ffmpeg
+	return createVideoFromFrames(tempDir, config.OutputFile, config.FrameRate)
+}
+
+// saveJPEG saves an image as JPEG
+func saveJPEG(img image.Image, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	
+	return jpeg.Encode(file, img, &jpeg.Options{Quality: 90})
+}
+
+// addTextOverlay adds text to the image (simple implementation)
+func addTextOverlay(img *image.RGBA, text string, config Config) {
+	// Simple text overlay - draw white rectangles as "pixels" to form text
+	// This is a basic implementation - could be enhanced with proper font rendering
+	bounds := img.Bounds()
+	
+	// Position text in bottom-right corner
+	startX := bounds.Max.X - 150
+	startY := bounds.Max.Y - 40
+	
+	// Draw a semi-transparent background rectangle
+	white := color.RGBA{255, 255, 255, 255}
+	black := color.RGBA{0, 0, 0, 180}
+	
+	// Background rectangle
+	for y := startY - 10; y < startY + 25; y++ {
+		for x := startX - 10; x < startX + 140; x++ {
+			if x >= 0 && x < bounds.Max.X && y >= 0 && y < bounds.Max.Y {
+				existing := img.RGBAAt(x, y)
+				// Alpha blend
+				alpha := float64(black.A) / 255.0
+				newR := uint8(float64(black.R)*alpha + float64(existing.R)*(1-alpha))
+				newG := uint8(float64(black.G)*alpha + float64(existing.G)*(1-alpha))
+				newB := uint8(float64(black.B)*alpha + float64(existing.B)*(1-alpha))
+				img.SetRGBA(x, y, color.RGBA{newR, newG, newB, 255})
+			}
+		}
+	}
+	
+	// Simple bitmap text rendering (just for "Height: XX")
+	// This is very basic - in production you'd use a proper font library
+	for i, char := range text {
+		drawChar(img, char, startX+i*8, startY, white)
+	}
+}
+
+// drawChar draws a simple character (very basic bitmap font)
+func drawChar(img *image.RGBA, char rune, x, y int, textColor color.RGBA) {
+	// Very simple 8x8 bitmap characters for basic text
+	// Only implementing the characters we need: "Height: 0123456789"
+	bounds := img.Bounds()
+	
+	var pattern [][]bool
+	switch char {
+	case 'H':
+		pattern = [][]bool{
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{true, true, true, true, true},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+		}
+	case 'e':
+		pattern = [][]bool{
+			{false, true, true, true, false},
+			{true, false, false, false, false},
+			{true, true, true, false, false},
+			{true, false, false, false, false},
+			{false, true, true, true, false},
+		}
+	case 'i':
+		pattern = [][]bool{
+			{false, true, false},
+			{false, false, false},
+			{false, true, false},
+			{false, true, false},
+			{false, true, false},
+		}
+	case 'g':
+		pattern = [][]bool{
+			{false, true, true, true, false},
+			{true, false, false, false, false},
+			{true, false, true, true, true},
+			{true, false, false, false, true},
+			{false, true, true, true, false},
+		}
+	case 'h':
+		pattern = [][]bool{
+			{true, false, false, false, false},
+			{true, false, false, false, false},
+			{true, true, true, false, false},
+			{true, false, false, true, false},
+			{true, false, false, true, false},
+		}
+	case 't':
+		pattern = [][]bool{
+			{false, true, false},
+			{true, true, true},
+			{false, true, false},
+			{false, true, false},
+			{false, true, false},
+		}
+	case ':':
+		pattern = [][]bool{
+			{false},
+			{true},
+			{false},
+			{true},
+			{false},
+		}
+	case ' ':
+		pattern = [][]bool{
+			{false, false, false},
+			{false, false, false},
+			{false, false, false},
+			{false, false, false},
+			{false, false, false},
+		}
+	default:
+		// For digits 0-9
+		if char >= '0' && char <= '9' {
+			digit := int(char - '0')
+			patterns := [][][]bool{
+				// 0
+				{{true, true, true}, {true, false, true}, {true, false, true}, {true, false, true}, {true, true, true}},
+				// 1
+				{{false, true, false}, {true, true, false}, {false, true, false}, {false, true, false}, {true, true, true}},
+				// 2
+				{{true, true, true}, {false, false, true}, {true, true, true}, {true, false, false}, {true, true, true}},
+				// 3
+				{{true, true, true}, {false, false, true}, {true, true, true}, {false, false, true}, {true, true, true}},
+				// 4
+				{{true, false, true}, {true, false, true}, {true, true, true}, {false, false, true}, {false, false, true}},
+				// 5
+				{{true, true, true}, {true, false, false}, {true, true, true}, {false, false, true}, {true, true, true}},
+				// 6
+				{{true, true, true}, {true, false, false}, {true, true, true}, {true, false, true}, {true, true, true}},
+				// 7
+				{{true, true, true}, {false, false, true}, {false, false, true}, {false, false, true}, {false, false, true}},
+				// 8
+				{{true, true, true}, {true, false, true}, {true, true, true}, {true, false, true}, {true, true, true}},
+				// 9
+				{{true, true, true}, {true, false, true}, {true, true, true}, {false, false, true}, {true, true, true}},
+			}
+			pattern = patterns[digit]
+		}
+	}
+	
+	// Draw the pattern
+	for row, line := range pattern {
+		for col, pixel := range line {
+			if pixel {
+				px, py := x+col, y+row
+				if px >= 0 && px < bounds.Max.X && py >= 0 && py < bounds.Max.Y {
+					img.SetRGBA(px, py, textColor)
+				}
+			}
+		}
+	}
+}
+
+// createVideoFromFrames uses ffmpeg to create video from frame sequence
+func createVideoFromFrames(frameDir, outputFile string, frameRate int) error {
+	fmt.Printf("Creating video from frames...\n")
+	
+	// Check if ffmpeg is available
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return fmt.Errorf("ffmpeg not found. Please install ffmpeg to generate videos.\nOn Ubuntu/Debian: sudo apt install ffmpeg\nOn macOS: brew install ffmpeg")
+	}
+	
+	// ffmpeg command to create video
+	cmd := exec.Command("ffmpeg",
+		"-y", // Overwrite output file
+		"-framerate", strconv.Itoa(frameRate),
+		"-i", filepath.Join(frameDir, "frame_%04d.jpg"),
+		"-c:v", "libx264",
+		"-pix_fmt", "yuv420p",
+		"-crf", "18", // High quality
+		outputFile,
+	)
+	
+	// Capture output
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %v", err)
+	}
+	stderr := bufio.NewScanner(stderrPipe)
+	
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start ffmpeg: %v", err)
+	}
+	
+	// Print ffmpeg output (optional, for debugging)
+	go func() {
+		for stderr.Scan() {
+			// Uncomment next line for ffmpeg debugging
+			// fmt.Println("ffmpeg:", stderr.Text())
+		}
+	}()
+	
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("ffmpeg failed: %v", err)
+	}
+	
+	fmt.Printf("Video saved to %s\n", outputFile)
+	return nil
+}
+
 func printUsage(progName string) {
 	fmt.Printf("Usage: %s [flags] [x_min y_min x_max y_max]\n", progName)
 	fmt.Printf("  Renders algebraic numbers in the complex plane rectangle from (x_min + y_min*i) to (x_max + y_max*i)\n")
 	fmt.Printf("\nFlags:\n")
 	fmt.Printf("  --max-height N    Maximum polynomial height (complexity). Higher = more detail but slower (default: 15)\n")
+	fmt.Printf("  --video           Generate animation showing heights 2 to max-height (requires ffmpeg)\n")
+	fmt.Printf("  --fps N           Frame rate for video mode (default: 2)\n")
+	fmt.Printf("  --output FILE     Output filename (default: algebraic_numbers.png or .mp4 for video)\n")
 	fmt.Printf("  --help, -h        Show this help message\n")
 	fmt.Printf("\nExamples:\n")
-	fmt.Printf("  %s                           # Default view (-2-2i to 2+2i), height 15\n", progName)
-	fmt.Printf("  %s --max-height 20           # Higher detail\n", progName)
-	fmt.Printf("  %s 0 -1 1 2                  # Custom rectangle (0-i to 1+2i)\n", progName)
-	fmt.Printf("  %s --max-height 25 -1 -1 1 1 # High detail, zoomed view\n", progName)
+	fmt.Printf("  %s                                    # Default view (-2-2i to 2+2i), height 15\n", progName)
+	fmt.Printf("  %s --max-height 20                    # Higher detail\n", progName)
+	fmt.Printf("  %s --video --max-height 12            # Animation from height 2 to 12\n", progName)
+	fmt.Printf("  %s --video --fps 5 --max-height 8     # Faster animation, lower detail\n", progName)
+	fmt.Printf("  %s 0 -1 1 2                           # Custom rectangle (0-i to 1+2i)\n", progName)
+	fmt.Printf("  %s --video --max-height 15 -- -1 -1 1 1 # Animation of zoomed view\n", progName)
 }
 
 func main() {
@@ -373,6 +657,9 @@ func main() {
 	
 	// Define flags
 	maxHeight := flag.Int("max-height", 15, "Maximum polynomial height (complexity). Higher = more detail but slower")
+	videoMode := flag.Bool("video", false, "Generate animation showing heights 2 to max-height (requires ffmpeg)")
+	frameRate := flag.Int("fps", 2, "Frame rate for video mode")
+	outputFile := flag.String("output", "", "Output filename (default: algebraic_numbers.png or .mp4 for video)")
 	help := flag.Bool("h", false, "Show help message")
 	helpLong := flag.Bool("help", false, "Show help message")
 	
@@ -389,6 +676,15 @@ func main() {
 		return
 	}
 	
+	// Set default output filename based on mode
+	defaultOutput := "algebraic_numbers.png"
+	if *videoMode {
+		defaultOutput = "algebraic_numbers.mp4"
+	}
+	if *outputFile == "" {
+		*outputFile = defaultOutput
+	}
+	
 	config := Config{
 		Width:      1200,
 		Height:     800,
@@ -397,7 +693,9 @@ func main() {
 		XMax:       2.0,
 		YMax:       2.0,
 		MaxHeight:  *maxHeight,
-		OutputFile: "algebraic_numbers.png",
+		OutputFile: *outputFile,
+		VideoMode:  *videoMode,
+		FrameRate:  *frameRate,
 	}
 	
 	// Parse remaining positional arguments for viewport
@@ -427,21 +725,36 @@ func main() {
 		os.Exit(1)
 	}
 	
-	// Validate max height
+	// Validate parameters
 	if *maxHeight < 2 {
 		log.Fatal("Error: max-height must be at least 2")
 	}
-	if *maxHeight > 30 {
+	if *frameRate < 1 || *frameRate > 60 {
+		log.Fatal("Error: fps must be between 1 and 60")
+	}
+	
+	if *videoMode && *maxHeight > 15 {
+		fmt.Printf("Warning: Video mode with max-height %d will take a very long time\n", *maxHeight)
+		fmt.Printf("Consider using a lower max-height (8-12) for reasonable video generation time\n")
+	} else if !*videoMode && *maxHeight > 30 {
 		fmt.Printf("Warning: max-height %d is very high and may take a long time\n", *maxHeight)
 	}
 	
 	fmt.Printf("Rendering complex plane from (%.2f + %.2fi) to (%.2f + %.2fi)\n",
 		config.XMin, config.YMin, config.XMax, config.YMax)
 	
-	fmt.Println("Calculating algebraic numbers...")
-	points := generateAlgebraicNumbers(config.MaxHeight)
-	
-	if err := renderImage(points, config); err != nil {
-		log.Fatalf("Failed to render image: %v", err)
+	if *videoMode {
+		// Generate video animation
+		if err := generateVideo(config); err != nil {
+			log.Fatalf("Failed to generate video: %v", err)
+		}
+	} else {
+		// Generate single image
+		fmt.Println("Calculating algebraic numbers...")
+		points := generateAlgebraicNumbers(config.MaxHeight)
+		
+		if err := renderImage(points, config); err != nil {
+			log.Fatalf("Failed to render image: %v", err)
+		}
 	}
 }

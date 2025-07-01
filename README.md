@@ -19,9 +19,11 @@ This visualizer generates polynomials of various "heights" (complexity measures)
 
 - **Multiple implementations**: C (OpenGL), C (PNG), and Go versions
 - **Interactive viewport**: Specify custom complex plane rectangles
-- **Color coding**: Different colors for different polynomial degrees
+- **Color coding**: Different colors for different leading coefficients
 - **Scalable rendering**: Blob sizes adjust based on polynomial height
 - **High performance**: Go version renders in under 1 second
+- **Video animation**: Watch algebraic numbers fill the plane as complexity increases
+- **Parallel processing**: Utilizes all CPU cores for fast computation
 
 ## Usage
 

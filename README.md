@@ -45,15 +45,21 @@ make                      # Build C OpenGL version
 
 ## Color Scheme
 
-- **Red**: Linear polynomials (degree 1)
-- **Green**: Quadratic polynomials (degree 2)  
-- **Blue**: Cubic polynomials (degree 3)
-- **Yellow**: Quartic polynomials (degree 4)
-- **Orange**: Quintic polynomials (degree 5)
-- **Cyan**: Degree 6
-- **Magenta**: Degree 7
-- **Gray**: Degree 8
-- **White**: Higher degrees
+Colors indicate the **leading coefficient** of the polynomial (not the degree):
+
+- **Red**: Leading coefficient 1 (algebraic integers)
+- **Green**: Leading coefficient 2
+- **Blue**: Leading coefficient 3
+- **Yellow**: Leading coefficient 4
+- **Magenta**: Leading coefficient 5
+- **Cyan**: Leading coefficient 6
+- **Orange**: Leading coefficient 7
+- **Lime**: Leading coefficient 8
+- **Hot Pink**: Leading coefficient 9
+- **Purple**: Leading coefficient 10
+- **White**: Higher coefficients
+
+Point size decreases as the polynomial height (sum of coefficient magnitudes) increases.
 
 ## Mathematical Background
 

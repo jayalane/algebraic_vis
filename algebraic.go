@@ -16,9 +16,10 @@ import (
 
 // Point represents an algebraic number with its properties
 type Point struct {
-	Z complex128 // The complex number
-	H int        // Height (complexity measure)
-	O int        // Order (degree of polynomial)
+	Z              complex128 // The complex number
+	H              int        // Height (complexity measure)
+	O              int        // Order (degree of polynomial)
+	LeadingCoeff   int        // Leading coefficient of the polynomial
 }
 
 // Config holds rendering parameters
@@ -161,9 +162,10 @@ func generateAlgebraicNumbers(maxHeight int) []Point {
 				for _, root := range roots {
 					stats.roots++
 					points = append(points, Point{
-						Z: root,
-						H: h,
-						O: order,
+						Z:            root,
+						H:            h,
+						O:            order,
+						LeadingCoeff: coeffMags[order], // Leading coefficient magnitude
 					})
 				}
 			}
@@ -174,10 +176,10 @@ func generateAlgebraicNumbers(maxHeight int) []Point {
 	return points
 }
 
-// drawBlob draws a gaussian blob at the specified location
+// drawBlob draws a gaussian blob at the specified location with proper falloff
 func drawBlob(img *image.RGBA, x, y int, radius float64, col color.RGBA) {
 	bounds := img.Bounds()
-	r := int(radius + 1)
+	r := int(radius + 5) // Extend more for larger blobs
 
 	for dy := -r; dy <= r; dy++ {
 		for dx := -r; dx <= r; dx++ {
@@ -187,9 +189,11 @@ func drawBlob(img *image.RGBA, x, y int, radius float64, col color.RGBA) {
 			}
 
 			dist := math.Sqrt(float64(dx*dx + dy*dy))
-			if dist <= radius {
-				intensity := math.Exp(-dist*dist / (2 * radius*radius / 4))
-				
+			// Gaussian falloff with wider spread for dramatic glow effect
+			sigma := radius / 2.5 // Wider gaussian
+			intensity := math.Exp(-dist*dist / (2 * sigma * sigma))
+			
+			if intensity > 0.005 { // Lower threshold for more glow
 				// Get existing pixel
 				existing := img.RGBAAt(px, py)
 				
@@ -214,18 +218,21 @@ func drawBlob(img *image.RGBA, x, y int, radius float64, col color.RGBA) {
 	}
 }
 
-// getColorForOrder returns color based on polynomial order
-func getColorForOrder(order int) color.RGBA {
-	switch order {
-	case 1: return color.RGBA{255, 0, 0, 255}     // Red
+// getColorForLeadingCoeff returns color based on leading coefficient
+// Red = 1 (algebraic integers), Green = 2, Blue = 3, Yellow = 4, etc.
+func getColorForLeadingCoeff(coeff int) color.RGBA {
+	switch coeff {
+	case 1: return color.RGBA{255, 0, 0, 255}     // Red (algebraic integers)
 	case 2: return color.RGBA{0, 255, 0, 255}     // Green
 	case 3: return color.RGBA{0, 0, 255, 255}     // Blue
-	case 4: return color.RGBA{179, 179, 0, 255}   // Yellow
-	case 5: return color.RGBA{255, 153, 0, 255}   // Orange
+	case 4: return color.RGBA{255, 255, 0, 255}   // Yellow
+	case 5: return color.RGBA{255, 0, 255, 255}   // Magenta
 	case 6: return color.RGBA{0, 255, 255, 255}   // Cyan
-	case 7: return color.RGBA{255, 0, 255, 255}   // Magenta
-	case 8: return color.RGBA{153, 153, 153, 255} // Gray
-	default: return color.RGBA{255, 255, 255, 255} // White
+	case 7: return color.RGBA{255, 128, 0, 255}   // Orange
+	case 8: return color.RGBA{128, 255, 0, 255}   // Lime
+	case 9: return color.RGBA{255, 0, 128, 255}   // Hot pink
+	case 10: return color.RGBA{128, 0, 255, 255}  // Purple
+	default: return color.RGBA{255, 255, 255, 255} // White for higher coefficients
 	}
 }
 
@@ -257,15 +264,16 @@ func renderImage(points []Point, config Config) error {
 		screenX := int((x - config.XMin) / xRange * float64(config.Width))
 		screenY := int((config.YMax - y) / yRange * float64(config.Height)) // Flip Y
 		
-		// Calculate blob size (lower height = larger dots)
-		k1 := 8.0 * (4.0 / xRange) // Scale with zoom
+		// Calculate blob size (lower height = larger dots) - much larger like Wikipedia image
+		k1 := 25.0 * (4.0 / xRange) // Much larger base size
 		k2 := 0.5
 		radius := k1 * math.Pow(k2, float64(point.H-3))
 		
-		if radius < 0.8 { radius = 0.8 }
-		if radius > 25 { radius = 25 }
+		if radius < 3.0 { radius = 3.0 }  // Larger minimum
+		if radius > 80 { radius = 80 }    // Much larger maximum
 		
-		color := getColorForOrder(point.O)
+		// Color based on leading coefficient (not degree!)
+		color := getColorForLeadingCoeff(point.LeadingCoeff)
 		drawBlob(img, screenX, screenY, radius, color)
 	}
 	
